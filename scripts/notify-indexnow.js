@@ -1,9 +1,10 @@
-// scripts/notify-indexnow.js
 import fetch from 'node-fetch';
 import fs from 'fs/promises';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { index, url } from '../src/utils/site.js';
+
+import allVideosData from '../src/data/allVideos.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -34,16 +35,14 @@ if (!API_KEY_NAME) {
     process.exit(1);
 }
 
-const VIDEOS_JSON_PATH = path.resolve(__dirname, '../src/data/videos.json');
 const LAST_SENT_URLS_CACHE = path.resolve(__dirname, '../.indexnow_cache.json');
 
 async function getAllVideoUrls() {
   try {
-    const fileContent = await fs.readFile(VIDEOS_JSON_PATH, 'utf-8');
-    const allVideos = JSON.parse(fileContent);
+    const allVideos = allVideosData;
 
     if (!Array.isArray(allVideos)) {
-      console.error('Data videos.json tidak dalam format array yang diharapkan.');
+      console.error('Data allVideos.ts tidak dalam format array yang diharapkan.');
       return [];
     }
 
@@ -52,7 +51,7 @@ async function getAllVideoUrls() {
       return `${YOUR_DOMAIN}/${slug}-${video.id}/`;
     });
   } catch (error) {
-    console.error('Gagal memuat atau memproses videos.json:', error);
+    console.error('Gagal memuat atau memproses data video dari allVideos.ts:', error);
     return [];
   }
 }
