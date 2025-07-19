@@ -4,7 +4,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { index, url } from '../src/utils/site.js';
 
-import allVideosData from '../src/data/allVideos.js';
+import allVideosData from '../src/data/allVideos.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
