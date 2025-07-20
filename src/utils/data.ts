@@ -1,66 +1,157 @@
-// src/utils/data.ts
-export interface VideoData {
-  id: string;
-  title: string;
-  description?: string;
-  category: string;
-  thumbnail: string;
-  thumbnailWidth?: number;
-  thumbnailHeight?: number;
-  datePublished?: string;
-  dateModified?: string;
-  embedUrl: string;
-  tags: string;
-  previewUrl?: string;
-  duration?: string;
+import fetch from 'node-fetch';
+import fs from 'fs/promises';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import { index, url } from '../src/utils/site.js';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+function slugify(text) {
+  return text
+    .toString()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .trim()
+    .replace(/\s+/g, '-')
+    .replace(/[^\w-]+/g, '')
+    .replace(/--+/g, '-');
 }
 
-const GOOGLE_SHEETS_URL =
-  'https://docs.google.com/spreadsheets/d/e/2PACX-1vS3h4dCS_WgTyWXOf7ctNScFMzP8kEhgkQ7FdIgVsxBdxywXzdexKGZKbeGnwQPMe5L6lsq72LteXQH/pub?gid=0&single=true&output=tsv';
+const YOUR_DOMAIN = url;
+const API_KEY_NAME = index;
+const INDEXNOW_ENDPOINT = 'https://api.indexnow.org/IndexNow';
 
-export async function getAllVideos(): Promise<VideoData[]> {
+// New: Google Sheets TSV URL
+const GOOGLE_SHEETS_TSV_URL = 'https://docs.google.com/spreadsheets/d/e/2PACX-1vS3h4dCS_WgTyWXOf7ctNScFMzP8kEhgkQ7FdIgVsxBdxywXzdexKGZKbeGnwQPMe5L6lsq72LteXQH/pub?gid=0&single=true&output=tsv';
+
+if (!YOUR_DOMAIN) {
+  console.error("Error: PUBLIC_SITE_URL is not defined for IndexNow");
+  process.exit(1);
+}
+
+if (!API_KEY_NAME) {
+  console.error("Error: IndexNow API Key is not defined");
+  process.exit(1);
+}
+
+const LAST_SENT_URLS_CACHE = path.resolve(__dirname, '../.indexnow_cache.json');
+
+async function getAllVideoUrls() {
   try {
-    console.log('[getAllVideos] Mengambil data video dari Google Sheets...');
-    const response = await fetch(GOOGLE_SHEETS_URL);
-
+    // Fetch data from Google Sheets TSV
+    const response = await fetch(GOOGLE_SHEETS_TSV_URL);
     if (!response.ok) {
-      throw new Error(`Gagal mengambil data: ${response.statusText}`);
+      throw new Error(`Failed to fetch Google Sheet data: ${response.status} - ${response.statusText}`);
+    }
+    const tsvContent = await response.text();
+
+    // Parse TSV data
+    const rows = tsvContent.split('\n').filter(row => row.trim() !== ''); // Split by line and remove empty lines
+    if (rows.length === 0) {
+      console.warn('Google Sheet is empty or contains no data.');
+      return [];
     }
 
-    const tsvData = await response.text();
-    const videos: VideoData[] = parseTsv(tsvData);
+    const headers = rows[0].split('\t').map(header => header.trim()); // Assuming first row is headers
+    const dataRows = rows.slice(1); // Actual data starts from the second row
 
-    console.log(`[getAllVideos] Data video dimuat. Total video: ${videos.length}`);
-    return videos;
-  } catch (error) {
-    console.error('[getAllVideos] Error saat memuat data video:', error);
-    return [];
-  }
-}
-
-function parseTsv(tsv: string): VideoData[] {
-  const lines = tsv.split('\n').filter(line => line.trim() !== '');
-  if (lines.length === 0) {
-    return [];
-  }
-
-  const headers = lines[0].split('\t').map(header => header.trim());
-
-  const dataLines = lines.slice(1);
-
-  return dataLines.map(line => {
-    const values = line.split('\t').map(value => value.trim());
-    const video: Partial<VideoData> = {};
-
-    headers.forEach((header, index) => {
-      const key = header.charAt(0).toLowerCase() + header.slice(1);
-
-      if (key === 'thumbnailWidth' || key === 'thumbnailHeight') {
-        video[key as keyof VideoData] = parseInt(values[index], 10);
-      } else {
-        video[key as keyof VideoData] = values[index];
-      }
+    const allVideos = dataRows.map(row => {
+      const values = row.split('\t');
+      const video = {};
+      headers.forEach((header, index) => {
+        video[header] = values[index];
+      });
+      return video;
     });
-    return video as VideoData;
-  });
+
+    // Validate that 'title' and 'id' exist in the parsed data
+    const validVideos = allVideos.filter(video => video.title && video.id);
+    if (validVideos.length !== allVideos.length) {
+      console.warn('Some rows in Google Sheet are missing "title" or "id" and will be skipped.');
+    }
+
+    return validVideos.map(video => {
+      const slug = slugify(video.title || 'untitled-video');
+      return `${YOUR_DOMAIN}/${slug}-${video.id}/`;
+    });
+  } catch (error) {
+    console.error('Failed to load or process Google Sheet data:', error);
+    return [];
+  }
 }
+
+async function sendToIndexNow(urlsToSend, keyName) {
+  if (urlsToSend.length === 0) {
+    console.log('No new or updated URLs to send to IndexNow.');
+    return;
+  }
+
+  const API_KEY_LOCATION = `${YOUR_DOMAIN}/${keyName}.txt`;
+  const chunkSize = 10000;
+
+  for (let i = 0; i < urlsToSend.length; i += chunkSize) {
+    const chunk = urlsToSend.slice(i, i + chunkSize);
+
+    const payload = {
+      host: new URL(YOUR_DOMAIN).hostname,
+      key: keyName,
+      keyLocation: API_KEY_LOCATION,
+      urlList: chunk,
+    };
+
+    try {
+      console.log(`Sending ${chunk.length} URLs to IndexNow (chunk ${Math.floor(i / chunkSize) + 1})...`);
+      const response = await fetch(INDEXNOW_ENDPOINT, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json; charset=utf-8',
+        },
+        body: JSON.stringify(payload),
+      });
+
+      if (response.ok) {
+        console.log(`Successfully sent URL chunk to IndexNow. Status: ${response.status}`);
+      } else {
+        console.error(`Failed to send URL chunk to IndexNow: ${response.status} - ${response.statusText}`);
+        const errorBody = await response.text();
+        console.error('Response body:', errorBody);
+      }
+    } catch (error) {
+      console.error('An error occurred while sending to IndexNow:', error);
+    }
+  }
+}
+
+async function main() {
+  if (!API_KEY_NAME || typeof API_KEY_NAME !== 'string' || API_KEY_NAME.length !== 36) {
+    console.error("Error: IndexNow API Key is invalid or missing.");
+    process.exit(1);
+  }
+
+  console.log(`Using IndexNow key from site.js: ${API_KEY_NAME}`);
+
+  const currentUrls = await getAllVideoUrls();
+  let lastSentUrls = [];
+
+  try {
+    const cacheContent = await fs.readFile(LAST_SENT_URLS_CACHE, 'utf-8');
+    lastSentUrls = JSON.parse(cacheContent);
+  } catch (error) {
+    console.log('IndexNow cache not found or corrupted, will send all new URLs.');
+  }
+
+  const urlsToSubmit = currentUrls.filter(url => !lastSentUrls.includes(url));
+
+  await sendToIndexNow(urlsToSubmit, API_KEY_NAME);
+
+  try {
+    await fs.writeFile(LAST_SENT_URLS_CACHE, JSON.stringify(currentUrls), 'utf-8');
+    console.log('IndexNow cache successfully updated.');
+  } catch (error) {
+    console.error('Failed to update IndexNow cache:', error);
+  }
+}
+
+main();
